@@ -1,0 +1,15 @@
+# --- Core computer vision ---
+opencv-python>=4.8.0
+
+# --- Numerical computing ---
+numpy>=1.24.0
+
+# --- PostgreSQL database connector (optional) ---
+pip install psycopg2-binary
+psycopg2-binary>=2.9.0
+
+# --- Standard library modules used (no installation required) ---
+cv2        — provided by opencv-python above
+numpy      — provided above
+tkinter    — bundled with Python (Windows/macOS); on Ubuntu: sudo apt install python3-tk
+math, time, os, sys, json, datetime, threading, collections — Python built-ins
