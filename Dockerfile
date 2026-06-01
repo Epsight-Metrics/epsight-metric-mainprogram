@@ -22,4 +22,4 @@ COPY . .
 EXPOSE 8000
 
 # Start command with shell to expand $PORT
-CMD uvicorn cv_api:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD sh -c "uvicorn cv_api:app --host 0.0.0.0 --port ${PORT:-8000}"
