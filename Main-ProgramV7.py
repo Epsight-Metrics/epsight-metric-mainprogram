@@ -34,6 +34,7 @@ from modules.rendering import (
 from modules.api_client import ApiClient
 from modules.video_stream import VideoStream
 from modules.video_stream_websocket import VideoStreamWebSocket
+from modules.frame_uploader import FrameUploader
 from modules.actions import (
     action_deteksi_part,
     action_save_reference,
@@ -84,6 +85,9 @@ def main(cfg: dict):
     else:
         video_stream = VideoStream(port=5000, quality=70)
         print("  [STREAM] Using MJPEG (latency: 50-150ms)")
+    
+    # Initialize frame uploader for CV API
+    frame_uploader = FrameUploader(cfg.get("cv_api", {}))
     
     notif   = Notification()
     warning = WarningOverlay()
@@ -172,6 +176,11 @@ def main(cfg: dict):
         # Compare measurements against profile references
         results = [ref_mgr.compare(obj, tol) for obj in stable_objects]
         process_pending_reference(stable_objects, ref_mgr, notif, tol)
+
+        # Upload frame and detections to CV API for realtime access
+        if stable_objects:
+            frame_uploader.upload_frame(roi_frame)
+            frame_uploader.upload_detections(stable_objects, results)
 
         # Rendering overlay visual annotations
         display     = frame.copy()
@@ -277,6 +286,7 @@ def main(cfg: dict):
     db_mgr.close()
     api_client.stop()
     video_stream.stop()
+    frame_uploader.stop()
     print("\n[INFO] Program selesai.")
 
 

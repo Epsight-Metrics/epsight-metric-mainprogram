@@ -40,7 +40,13 @@
                     "enabled":  false,
                     "quality":  60,
                     "fps":  10
-                }
+                },
+                "use_websocket": true
+            },
+    "cv_api":  {
+                "enabled":  true,
+                "cv_api_url":  "http://localhost:8000",
+                "upload_interval":  0.5
             },
     "db":  {
                "enabled":  false,

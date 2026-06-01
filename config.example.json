@@ -23,6 +23,11 @@
     "batch_id": null,
     "timeout": 5
   },
+  "cv_api": {
+    "enabled": true,
+    "cv_api_url": "http://localhost:8000",
+    "upload_interval": 0.5
+  },
   "db": {
     "enabled": false,
     "host": "localhost",
@@ -30,5 +35,8 @@
     "dbname": "capstone_db",
     "user": "postgres",
     "password": "YOUR_DB_PASSWORD_HERE"
+  },
+  "video_stream": {
+    "use_websocket": true
   }
 }
