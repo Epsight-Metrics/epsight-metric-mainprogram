@@ -1,23 +1,5 @@
-# --- Core computer vision ---
-opencv-python>=4.8.0
-
-# --- Numerical computing ---
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
+opencv-python-headless>=4.8.0
 numpy>=1.24.0
-
-# --- HTTP client for API integration ---
-requests>=2.31.0
-
-# --- Video streaming server ---
-Flask>=3.0.0
-flask-socketio>=5.3.0
-flask-cors>=4.0.0
-python-socketio>=5.11.0
-
-# --- USB Serial communication (optional) ---
-pyserial>=3.5
-
-# --- Security ---
-python-dotenv>=1.0.0
-
-# --- PostgreSQL database connector (optional) ---
-psycopg2-binary>=2.9.0
