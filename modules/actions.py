@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modul Aksi Keyboard Operator
 Sistem Inspeksi Dimensi Part Manufaktur
 """
@@ -14,10 +14,11 @@ from modules.rendering import C
 
 
 def action_deteksi_part(objects: list, results: list, roi_frame,
-                        notif, warning, db_mgr, cfg: dict):
+                        notif, warning, db_mgr, cfg: dict, api_client=None):
     """
     Menyimpan hasil pengukuran semua objek terdeteksi ke file JSON,
     menyimpan citra crop ROI ke PNG, mengirimkan log data ke PostgreSQL,
+    mengirim ke backend via HTTP (jika api_client tersedia),
     dan memicu warning overlay jika ada part NO GOOD.
     """
     if not objects:
@@ -32,7 +33,7 @@ def action_deteksi_part(objects: list, results: list, roi_frame,
         warning.trigger(len(ng_list))
         warning.set_duration(cfg["warning_duration"])
     elif noref_list:
-        notif.add(f"{len(noref_list)} objek tanpa referensi — simpan dulu [V]", C["warn"], 4.0)
+        notif.add(f"{len(noref_list)} objek tanpa referensi ΓÇö simpan dulu [V]", C["warn"], 4.0)
 
     dir_deteksi = base_path(cfg["dir_deteksi"])
     os.makedirs(dir_deteksi, exist_ok=True)
@@ -66,28 +67,42 @@ def action_deteksi_part(objects: list, results: list, roi_frame,
         notif.add("Gagal simpan file deteksi ke disk!", C["ng"])
 
     for i, (obj, (st, mname, detail)) in enumerate(zip(objects, results)):
+        id_part = f"{ts}_obj{i+1}"
+        nilai_dimensi = {
+            "shape": obj.shape,
+            "diameter_mm": obj.diameter_mm,
+            "width_mm": obj.width_mm,
+            "height_mm": obj.height_mm,
+            "area_px": obj.area_px
+        }
+        
         db_mgr.save_log(
             timestamp=now_iso(),
-            id_part=f"{ts}_obj{i+1}",
-            nilai_dimensi={
-                "shape": obj.shape,
-                "diameter_mm": obj.diameter_mm,
-                "width_mm": obj.width_mm,
-                "height_mm": obj.height_mm,
-                "area_px": obj.area_px
-            },
+            id_part=id_part,
+            nilai_dimensi=nilai_dimensi,
             status=st,
             matched_ref=mname,
             image_path=img_path,
             shape=obj.shape
         )
+        
+        # Kirim ke backend via HTTP (non-blocking)
+        if api_client:
+            api_client.send_inspection(
+                id_part=id_part,
+                shape=obj.shape,
+                nilai_dimensi=nilai_dimensi,
+                status=st,
+                matched_ref=mname,
+                image_path=img_path,
+            )
 
-    summary = f"✓ {len(good_list)} GOOD"
+    summary = f"Γ£ô {len(good_list)} GOOD"
     if ng_list:
-        summary += f"  ✗ {len(ng_list)} NG"
+        summary += f"  Γ£ù {len(ng_list)} NG"
     if noref_list:
         summary += f"  ? {len(noref_list)} NO REF"
-    notif.add(f"Deteksi selesai — {summary}", C["good"] if not ng_list else C["warn"], 4.0)
+    notif.add(f"Deteksi selesai ΓÇö {summary}", C["good"] if not ng_list else C["warn"], 4.0)
     print(f"[DETEKSI] {json_path}")
 
 

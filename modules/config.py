@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modul Manajemen Konfigurasi
 Sistem Inspeksi Dimensi Part Manufaktur
 """
@@ -48,6 +48,16 @@ DEFAULT_CONFIG = {
     "dir_screenshot"  : "screenshots",
     "dir_deteksi"     : "deteksi_part",
     "file_reference"  : "referensi.json",
+    "api": {
+        "enabled"    : False,
+        "api_url"    : "http://localhost:3000",
+        "part_id"    : 1,
+        "operator_id": None,
+        "session_id" : None,
+        "batch_id"   : None,
+        "timeout"    : 5,
+        "api_key"    : "" 
+    },
     "db": {
         "enabled" : False,
         "host"    : "localhost",
@@ -76,7 +86,9 @@ def load_config() -> dict:
         # Shallow-merge top-level keys, ensuring all defaults are present.
         merged = dict(DEFAULT_CONFIG)
         merged.update(data)
-        # Deep-merge the nested "db" sub-dictionary separately.
+        # Deep-merge the nested "api" and "db" sub-dictionaries separately.
+        merged["api"] = dict(DEFAULT_CONFIG["api"])
+        merged["api"].update(data.get("api", {}))
         merged["db"] = dict(DEFAULT_CONFIG["db"])
         merged["db"].update(data.get("db", {}))
         print(f"[CFG] Konfigurasi dimuat dari '{CONFIG_PATH}'")
@@ -93,3 +105,4 @@ def save_config(cfg: dict) -> None:
         print(f"[CFG] Konfigurasi disimpan ke '{CONFIG_PATH}'")
     except Exception as e:
         print(f"[CFG] Gagal simpan config.json: {e}")
+

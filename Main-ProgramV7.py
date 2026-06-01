@@ -1,7 +1,7 @@
-"""
+﻿"""
 Sistem Inspeksi Dimensi Part Manufaktur Berbasis Computer Vision
-Capstone Project A.3 — Automated Dimensional Inspection
-Universitas Brawijaya, Fakultas Ilmu Komputer — 2026
+Capstone Project A.3 â€” Automated Dimensional Inspection
+Universitas Brawijaya, Fakultas Ilmu Komputer â€” 2026
 
 Tim Pengembang : Jagoan Mamah Papah
 Mitra Industri : PT. Indonesia Epson Industry
@@ -31,6 +31,9 @@ from modules.rendering import (
     draw_result_panel,
     draw_controls,
 )
+from modules.api_client import ApiClient
+from modules.video_stream import VideoStream
+from modules.video_stream_websocket import VideoStreamWebSocket
 from modules.actions import (
     action_deteksi_part,
     action_save_reference,
@@ -44,7 +47,7 @@ def main(cfg: dict):
     Menangkap frame dari kamera, menerapkan pipeline prapemrosesan, deteksi kontur,
     stabilisasi pelacakan temporal, pembandingan referensi, dan merender HUD/Overlay.
     """
-    WINDOW_NAME = "Capstone — Sistem Inspeksi Dimensi v7"
+    WINDOW_NAME = "Capstone â€” Sistem Inspeksi Dimensi v7"
 
     ppm          = cfg["pixel_per_mm"]
     tol          = cfg["tolerance_mm"]
@@ -56,12 +59,12 @@ def main(cfg: dict):
     ref_path     = base_path(cfg["file_reference"])
 
     print("=" * 62)
-    print("  CAPSTONE — Sistem Inspeksi Dimensi Part Manufaktur v7 (Modular)")
+    print("  CAPSTONE â€” Sistem Inspeksi Dimensi Part Manufaktur v7 (Modular)")
     print("  Tim: Jagoan Mamah Papah | Universitas Brawijaya 2026")
     print("=" * 62)
     print(f"  Kamera    : {cam_src}")
     print(f"  Skala     : {ppm} px/mm")
-    print(f"  Toleransi : ±{tol} mm")
+    print(f"  Toleransi : Â±{tol} mm")
     print(f"  Tracker   : CONFIRM={ObjectTracker.CONFIRM_FRAMES}fr "
           f"GHOST={ObjectTracker.GHOST_FRAMES}fr "
           f"SMOOTH={ObjectTracker.SMOOTH_FRAMES}fr")
@@ -70,9 +73,30 @@ def main(cfg: dict):
     # Inisialisasi komponen sistem
     ref_mgr = ReferenceManager(ref_path)
     db_mgr  = DatabaseManager(cfg["db"])
+    api_client = ApiClient(cfg.get("api", {}))
+    
+    # Choose video streaming method: WebSocket (low latency) or MJPEG (simple)
+    use_websocket = cfg.get("video_stream", {}).get("use_websocket", True)
+    
+    if use_websocket:
+        video_stream = VideoStreamWebSocket(port=5000, quality=70, fps_limit=30)
+        print("  [STREAM] Using WebSocket (low latency: 20-50ms)")
+    else:
+        video_stream = VideoStream(port=5000, quality=70)
+        print("  [STREAM] Using MJPEG (latency: 50-150ms)")
+    
     notif   = Notification()
     warning = WarningOverlay()
     tracker = ObjectTracker()
+
+    # Setup trigger callback untuk inspection dari dashboard
+    trigger_inspection = [False]  # Use list for mutable closure
+    def on_dashboard_trigger():
+        trigger_inspection[0] = True
+    api_client.set_trigger_callback(on_dashboard_trigger)
+
+    # Start video streaming server
+    video_stream.start()
 
     print(f"  [CAM] Membuka: {cam_src}")
     cap = cv2.VideoCapture(cam_src)
@@ -86,7 +110,7 @@ def main(cfg: dict):
         db_mgr.close()
         return
 
-    print(f"  [CAM] {int(cap.get(3))} × {int(cap.get(4))}")
+    print(f"  [CAM] {int(cap.get(3))} Ã— {int(cap.get(4))}")
     print("\n  D=Deteksi | V=Referensi | S=Screenshot | C=Kontur")
     print("  R=ROI | P=Debug | +/-=Threshold | Q=Keluar\n")
 
@@ -188,6 +212,9 @@ def main(cfg: dict):
         warning.draw(display, warn_dur)
         notif.draw(display)
 
+        # Update video stream frame
+        video_stream.update_frame(display)
+
         # FPS calculation
         now    = time.time()
         fps    = 0.85*fps + 0.15*(1.0/max(now-t_prev, 1e-5))
@@ -196,12 +223,20 @@ def main(cfg: dict):
         cv2.imshow(WINDOW_NAME, display)
         key = cv2.waitKey(1) & 0xFF
 
+        # Trigger dari dashboard (online mode)
+        if trigger_inspection[0]:
+            trigger_inspection[0] = False
+            action_deteksi_part(stable_objects, results, roi_frame,
+                                notif, warning, db_mgr, cfg, api_client)
+            print("[MAIN] Inspection triggered by dashboard")
+
         if key in (ord('q'), 27):
             break
 
         elif key == ord('d'):
+            # Trigger dari keyboard (offline mode)
             action_deteksi_part(stable_objects, results, roi_frame,
-                                notif, warning, db_mgr, cfg)
+                                notif, warning, db_mgr, cfg, api_client)
 
         elif key == ord('v'):
             action_save_reference(stable_objects, ref_mgr, notif, tol)
@@ -240,6 +275,8 @@ def main(cfg: dict):
     cap.release()
     cv2.destroyAllWindows()
     db_mgr.close()
+    api_client.stop()
+    video_stream.stop()
     print("\n[INFO] Program selesai.")
 
 
@@ -255,4 +292,4 @@ if __name__ == "__main__":
     if result is not None:
         main(result)
     else:
-        print("[INFO] Settings window closed — application terminated.")
+        print("[INFO] Settings window closed â€” application terminated.")

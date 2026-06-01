@@ -1,1 +1,9 @@
 CV_CODEBASE_ANALYSIS_AND_FASTAPI_BLUEPRINT.md
+# Konfigurasi lokal dengan credentials sensitif - jangan commit!
+config.json
+*.env
+__pycache__/
+*.pyc
+*.pyo
+screenshots/
+deteksi_part/
