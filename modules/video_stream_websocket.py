@@ -90,6 +90,15 @@ class VideoStreamWebSocket:
                 'clients': self._connected_clients,
                 'fps_limit': self.fps_limit
             }
+        
+        # MJPEG fallback endpoint for <img> tag compatibility
+        @self.app.route('/video_feed')
+        def video_feed():
+            from flask import Response
+            return Response(
+                self._generate_mjpeg_frames(),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
     
     def start(self):
         """Start Flask-SocketIO server di background thread."""
@@ -175,6 +184,32 @@ class VideoStreamWebSocket:
             except Exception as e:
                 print(f"[STREAM-WS] Broadcast error: {e}")
                 time.sleep(0.1)
+    
+    def _generate_mjpeg_frames(self):
+        """Generator untuk MJPEG stream (fallback untuk <img> tag)."""
+        while self._running:
+            with self.lock:
+                if self.frame is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Encode frame ke JPEG
+                ret, buffer = cv2.imencode(
+                    '.jpg',
+                    self.frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, self.quality]
+                )
+                
+                if not ret:
+                    continue
+                
+                frame_bytes = buffer.tobytes()
+            
+            # Yield frame dalam format MJPEG
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            time.sleep(1.0 / self.fps_limit)
     
     def stop(self):
         """Stop streaming server."""
