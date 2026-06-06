@@ -5,11 +5,12 @@ Sistem Inspeksi Dimensi Part Manufaktur (Mode Online)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import cv2
 import numpy as np
-from io import BytesIO
 import json
 import os
+import httpx
 
 # Import existing modules
 from modules.detection import preprocess, get_binary, find_objects, DetectedObject
@@ -32,10 +33,47 @@ DEFAULT_MIN_AREA       = _config.get("contour_min_area", 1500)
 DEFAULT_MIN_FEATURE_MM = _config.get("min_feature_mm", 5.0)
 DEFAULT_TOLERANCE_MM   = _config.get("tolerance_mm", 1.0)
 
+# URL Backend API untuk sinkronisasi referensi dari database
+BACKEND_API_URL = os.getenv(
+    "BACKEND_API_URL",
+    _config.get("api", {}).get("api_url", "https://epsight-metric-backend-production.up.railway.app")
+)
+
+# Initialize reference manager (fallback ke referensi.json jika tidak ada backend)
+ref_manager = ReferenceManager("referensi.json")
+
+async def sync_references_from_db():
+    """Load referensi dari Backend API (database) ke ref_manager di RAM."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(f"{BACKEND_API_URL}/api/reference/public")
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, dict) and data:
+                    ref_manager.refs = data
+                    print(f"[REF-SYNC] {len(data)} referensi dimuat dari database")
+                    for name, d in data.items():
+                        key = d.get("diameter_mm", d.get("width_mm", "?"))
+                        print(f"  · '{name}' — {d['shape']} ({key} mm)")
+                else:
+                    print("[REF-SYNC] Database kosong, tidak ada referensi")
+            else:
+                print(f"[REF-SYNC] Backend API error {res.status_code}, pakai referensi.json lokal")
+    except Exception as e:
+        print(f"[REF-SYNC] Gagal konek ke backend: {e}, pakai referensi.json lokal")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Saat startup: sync referensi dari database
+    await sync_references_from_db()
+    yield
+    # Saat shutdown: tidak perlu cleanup
+
 app = FastAPI(
     title="EPSight CV API",
     description="Computer Vision API for Online Inspection Mode",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS middleware
@@ -46,9 +84,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize reference manager
-ref_manager = ReferenceManager("referensi.json")
 
 # Store latest frame and detection results for realtime access
 latest_frame = None
@@ -68,8 +103,29 @@ async def health():
     return {
         "status": "ok",
         "references_loaded": len(ref_manager.refs),
+        "reference_names": list(ref_manager.refs.keys()),
+        "backend_api_url": BACKEND_API_URL,
         "timestamp": now_iso()
     }
+
+@app.post("/sync-references")
+async def sync_references():
+    """
+    Sinkronisasi referensi dari Backend API (database) ke memori CV API.
+    Dipanggil otomatis saat startup. Bisa dipanggil manual jika referensi di database berubah.
+    """
+    try:
+        count_before = len(ref_manager.refs)
+        await sync_references_from_db()
+        return {
+            "success": True,
+            "count_before": count_before,
+            "count_after": len(ref_manager.refs),
+            "references": list(ref_manager.refs.keys()),
+            "timestamp": now_iso()
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @app.post("/save-reference-from-stream")
 async def save_reference_from_stream(
