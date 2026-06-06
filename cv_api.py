@@ -1,4 +1,4 @@
-"""
+﻿"""
 CV API - Computer Vision Service
 Sistem Inspeksi Dimensi Part Manufaktur (Mode Online)
 """
@@ -9,11 +9,28 @@ import cv2
 import numpy as np
 from io import BytesIO
 import json
+import os
 
 # Import existing modules
 from modules.detection import preprocess, get_binary, find_objects, DetectedObject
 from modules.reference import ReferenceManager
 from modules.utils import now_iso
+
+# Load config.json untuk default parameter deteksi
+def load_config() -> dict:
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(config_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_config = load_config()
+DEFAULT_PPM            = _config.get("pixel_per_mm", 7.86)
+DEFAULT_CONTOUR_THRESH = _config.get("contour_thresh", 150)
+DEFAULT_MIN_AREA       = _config.get("contour_min_area", 1500)
+DEFAULT_MIN_FEATURE_MM = _config.get("min_feature_mm", 5.0)
+DEFAULT_TOLERANCE_MM   = _config.get("tolerance_mm", 1.0)
 
 app = FastAPI(
     title="EPSight CV API",
@@ -198,10 +215,18 @@ async def list_references():
     }
 
 @app.post("/update-frame")
-async def update_frame(file: UploadFile = File(...)):
+async def update_frame(
+    file: UploadFile = File(...),
+    ppm: float = Form(None),
+    contour_thresh: int = Form(None),
+    min_area: float = Form(None),
+    min_feature_mm: float = Form(None),
+    tolerance_mm: float = Form(None),
+):
     """
-    Update latest frame for stream-based operations
-    Called by Main-ProgramV7.py to keep frame in sync
+    Update latest frame dan jalankan deteksi real-time.
+    Dipanggil oleh browser (mode online) setiap ~500ms untuk bounding box overlay.
+    Juga dipanggil oleh Main-ProgramV7.py untuk sinkronisasi frame.
     """
     try:
         contents = await file.read()
@@ -215,14 +240,71 @@ async def update_frame(file: UploadFile = File(...)):
             global latest_frame
             latest_frame = image
         
-        return {"success": True}
+        # Gunakan parameter yang dikirim atau fallback ke config.json default
+        _ppm            = ppm            if ppm            is not None else DEFAULT_PPM
+        _contour_thresh = contour_thresh if contour_thresh is not None else DEFAULT_CONTOUR_THRESH
+        _min_area       = min_area       if min_area       is not None else DEFAULT_MIN_AREA
+        _min_feature_mm = min_feature_mm if min_feature_mm is not None else DEFAULT_MIN_FEATURE_MM
+        _tolerance_mm   = tolerance_mm   if tolerance_mm   is not None else DEFAULT_TOLERANCE_MM
+        
+        # Jalankan deteksi real-time
+        obj_list    = []
+        result_list = []
+        try:
+            gray, blurred, enhanced = preprocess(image)
+            binary  = get_binary(enhanced, _contour_thresh)
+            objects = find_objects(binary, _min_area, _ppm, _min_feature_mm)
+            
+            for obj in objects:
+                # Serialisasi data objek untuk SVG overlay di frontend
+                obj_data = {
+                    "shape":       obj.shape,
+                    "bbox":        list(obj.bbox),
+                    "center":      list(obj.center),
+                    "radius_px":   float(obj.radius_px),
+                    "diameter_mm": round(obj.diameter_mm, 2),
+                    "width_mm":    round(obj.width_mm,    2),
+                    "height_mm":   round(obj.height_mm,   2),
+                    "rot_box":     obj.rot_box.tolist() if hasattr(obj.rot_box, 'tolist') else obj.rot_box,
+                    "contour":     obj.contour.tolist() if hasattr(obj.contour, 'tolist') else []
+                }
+                obj_list.append(obj_data)
+                
+                # Bandingkan dengan referensi untuk status GOOD/NO GOOD/NO REF
+                status, matched_ref, detail = ref_manager.compare(obj, _tolerance_mm)
+                result_list.append({
+                    "status":      status,
+                    "matched_ref": matched_ref,
+                    "detail":      detail
+                })
+            
+            # Update latest_detections agar frontend bisa polling via /detections
+            with frame_lock:
+                global latest_detections
+                latest_detections = {
+                    "objects":   obj_list,
+                    "results":   result_list,
+                    "timestamp": now_iso()
+                }
+        except Exception as detect_err:
+            # Jika deteksi gagal, tetap return success agar stream tidak putus
+            print(f"[update-frame] Deteksi error: {detect_err}")
+        
+        # Kembalikan data deteksi langsung di response (stateless - cocok untuk cloud/Railway)
+        # Browser tidak perlu polling /detections terpisah, setiap request self-contained
+        return {
+            "success":   True,
+            "detected":  len(obj_list),
+            "objects":   obj_list,
+            "results":   result_list,
+            "timestamp": now_iso()
+        }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "objects": [], "results": [], "detected": 0}
 
 @app.post("/update-detections")
 async def update_detections(
-    objects: list = [],
-    results: list = []
+    data: dict
 ):
     """
     Update latest detection results for realtime display
@@ -231,8 +313,8 @@ async def update_detections(
         with frame_lock:
             global latest_detections
             latest_detections = {
-                "objects": objects,
-                "results": results,
+                "objects": data.get("objects", []),
+                "results": data.get("results", []),
                 "timestamp": now_iso()
             }
         return {"success": True}
