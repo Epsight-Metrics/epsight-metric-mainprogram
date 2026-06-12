@@ -1,4 +1,4 @@
-﻿"""
+"""
 CV API - Computer Vision Service
 Sistem Inspeksi Dimensi Part Manufaktur (Mode Online)
 """
@@ -61,6 +61,41 @@ async def sync_references_from_db():
                 print(f"[REF-SYNC] Backend API error {res.status_code}, pakai referensi.json lokal")
     except Exception as e:
         print(f"[REF-SYNC] Gagal konek ke backend: {e}, pakai referensi.json lokal")
+
+async def fetch_calibration_from_backend() -> dict:
+    """
+    Ambil kalibrasi TERBARU dari Backend API sebelum memproses gambar referensi.
+    Ini memastikan Add Reference selalu pakai PPM yang sama dengan Inspeksi.
+    Fallback ke nilai default dari config.json jika backend tidak tersedia.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(f"{BACKEND_API_URL}/api/engineer/calibration/public")
+            if res.status_code == 200:
+                data = res.json()
+                calib = {
+                    "ppm":            float(data.get("pixel_per_mm",   DEFAULT_PPM)),
+                    "tolerance_mm":   float(data.get("tolerance_mm",   DEFAULT_TOLERANCE_MM)),
+                    "contour_thresh": int(  data.get("contour_thresh", DEFAULT_CONTOUR_THRESH)),
+                    "min_area":       float(data.get("contour_min_area", DEFAULT_MIN_AREA)),
+                    "min_feature_mm": float(data.get("min_feature_mm", DEFAULT_MIN_FEATURE_MM)),
+                }
+                print(f"[CALIB-SYNC] Kalibrasi dimuat dari backend: ppm={calib['ppm']}, "
+                      f"thresh={calib['contour_thresh']}, min_area={calib['min_area']}")
+                return calib
+            else:
+                print(f"[CALIB-SYNC] Backend error {res.status_code}, pakai default config.json")
+    except Exception as e:
+        print(f"[CALIB-SYNC] Gagal konek backend: {e}, pakai default config.json")
+
+    # Fallback ke nilai default dari config.json
+    return {
+        "ppm":            DEFAULT_PPM,
+        "tolerance_mm":   DEFAULT_TOLERANCE_MM,
+        "contour_thresh": DEFAULT_CONTOUR_THRESH,
+        "min_area":       DEFAULT_MIN_AREA,
+        "min_feature_mm": DEFAULT_MIN_FEATURE_MM,
+    }
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -130,16 +165,29 @@ async def sync_references():
 @app.post("/save-reference-from-stream")
 async def save_reference_from_stream(
     name: str = Form(...),
-    ppm: float = Form(...),
-    tolerance_mm: float = Form(...),
-    contour_thresh: int = Form(150),
-    min_area: float = Form(1500),
-    min_feature_mm: float = Form(5.0)
+    # Parameter kalibrasi bersifat opsional — CV akan ambil dari backend terlebih dahulu
+    ppm: float            = Form(None),
+    tolerance_mm: float   = Form(None),
+    contour_thresh: int   = Form(None),
+    min_area: float       = Form(None),
+    min_feature_mm: float = Form(None)
 ):
     """
-    Save reference from current video stream frame
+    Save reference from current video stream frame.
+    CV program mengambil kalibrasi TERBARU dari backend sebelum memproses,
+    sehingga hasilnya selalu konsisten dengan kalibrasi yang digunakan saat Inspeksi.
     """
     try:
+        # 1. Ambil kalibrasi terbaru dari backend (SELALU dilakukan sebelum proses)
+        calib = await fetch_calibration_from_backend()
+
+        # Parameter dari request bisa override jika dikirim eksplisit
+        _ppm            = ppm            if ppm            is not None else calib["ppm"]
+        _tolerance_mm   = tolerance_mm   if tolerance_mm   is not None else calib["tolerance_mm"]
+        _contour_thresh = contour_thresh if contour_thresh is not None else calib["contour_thresh"]
+        _min_area       = min_area       if min_area       is not None else calib["min_area"]
+        _min_feature_mm = min_feature_mm if min_feature_mm is not None else calib["min_feature_mm"]
+
         with frame_lock:
             if latest_frame is None:
                 return {
@@ -147,38 +195,38 @@ async def save_reference_from_stream(
                     "error": "No frame available from stream",
                     "timestamp": now_iso()
                 }
-            
             image = latest_frame.copy()
-        
-        # Process image
+
+        # 2. Proses gambar dengan kalibrasi yang sudah di-fetch
         gray, blurred, enhanced = preprocess(image)
-        binary = get_binary(enhanced, contour_thresh)
-        objects = find_objects(binary, min_area, ppm, min_feature_mm)
-        
+        binary  = get_binary(enhanced, _contour_thresh)
+        objects = find_objects(binary, _min_area, _ppm, _min_feature_mm)
+
         if not objects:
             return {
                 "success": False,
                 "error": "No objects detected in current frame",
                 "timestamp": now_iso()
             }
-        
+
         if len(objects) > 1:
             return {
                 "success": False,
                 "error": f"Multiple objects detected ({len(objects)}). Please ensure only one object is in frame.",
                 "timestamp": now_iso()
             }
-        
-        obj = objects[0]
-        ref_data = ref_manager.save_reference(obj, name, tolerance_mm)
-        
+
+        obj      = objects[0]
+        ref_data = ref_manager.save_reference(obj, name, _tolerance_mm)
+
         return {
             "success": True,
             "reference": ref_data,
             "message": f"Reference '{name}' saved from stream",
+            "calibration_used": {"ppm": _ppm, "source": "backend"},
             "timestamp": now_iso()
         }
-        
+
     except Exception as e:
         return {
             "success": False,
@@ -190,69 +238,80 @@ async def save_reference_from_stream(
 async def save_reference(
     file: UploadFile = File(...),
     name: str = Form(...),
-    ppm: float = Form(...),
-    tolerance_mm: float = Form(...),
-    contour_thresh: int = Form(150),
-    min_area: float = Form(1500),
-    min_feature_mm: float = Form(5.0)
+    # Parameter kalibrasi bersifat opsional — CV akan ambil dari backend terlebih dahulu
+    ppm: float            = Form(None),
+    tolerance_mm: float   = Form(None),
+    contour_thresh: int   = Form(None),
+    min_area: float       = Form(None),
+    min_feature_mm: float = Form(None)
 ):
     """
-    Save a new reference profile from uploaded image
-    
+    Save a new reference profile from uploaded image.
+    CV program mengambil kalibrasi TERBARU dari backend sebelum memproses,
+    sehingga hasilnya selalu konsisten dengan kalibrasi yang digunakan saat Inspeksi.
+
     Parameters:
     - file: Image file (JPEG/PNG)
     - name: Reference name
-    - ppm: Pixel per millimeter calibration value
-    - tolerance_mm: Tolerance in millimeters
-    - contour_thresh: Contour detection threshold
-    - min_area: Minimum contour area in pixels
-    - min_feature_mm: Minimum feature size in mm
+    - ppm, tolerance_mm, contour_thresh, min_area, min_feature_mm: Opsional.
+      Jika tidak dikirim, diambil otomatis dari backend API.
     """
     try:
-        # 1. Decode image
+        # 1. Ambil kalibrasi TERBARU dari backend (SELALU dilakukan sebelum proses)
+        calib = await fetch_calibration_from_backend()
+
+        # Parameter dari request bisa override jika dikirim eksplisit
+        _ppm            = ppm            if ppm            is not None else calib["ppm"]
+        _tolerance_mm   = tolerance_mm   if tolerance_mm   is not None else calib["tolerance_mm"]
+        _contour_thresh = contour_thresh if contour_thresh is not None else calib["contour_thresh"]
+        _min_area       = min_area       if min_area       is not None else calib["min_area"]
+        _min_feature_mm = min_feature_mm if min_feature_mm is not None else calib["min_feature_mm"]
+
+        # 2. Decode image
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
+        nparr    = np.frombuffer(contents, np.uint8)
+        image    = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
-        
-        # 2. Preprocess image
+
+        # 3. Preprocess image
         gray, blurred, enhanced = preprocess(image)
-        
-        # 3. Get binary image
-        binary = get_binary(enhanced, contour_thresh)
-        
-        # 4. Find objects
-        objects = find_objects(binary, min_area, ppm, min_feature_mm)
-        
+
+        # 4. Get binary image
+        binary = get_binary(enhanced, _contour_thresh)
+
+        # 5. Find objects
+        objects = find_objects(binary, _min_area, _ppm, _min_feature_mm)
+
         if not objects:
             return {
                 "success": False,
                 "error": "No objects detected in image",
                 "timestamp": now_iso()
             }
-        
+
         if len(objects) > 1:
             return {
                 "success": False,
                 "error": f"Multiple objects detected ({len(objects)}). Please ensure only one object is in frame.",
                 "timestamp": now_iso()
             }
-        
-        # 5. Get the object
+
+        # 6. Get the object
         obj = objects[0]
-        
-        # 6. Save reference
-        ref_data = ref_manager.save_reference(obj, name, tolerance_mm)
-        
+
+        # 7. Save reference dengan kalibrasi yang sudah di-fetch dari backend
+        ref_data = ref_manager.save_reference(obj, name, _tolerance_mm)
+
         return {
             "success": True,
             "reference": ref_data,
             "message": f"Reference '{name}' saved successfully",
+            "calibration_used": {"ppm": _ppm, "source": "backend"},
             "timestamp": now_iso()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -278,6 +337,7 @@ async def update_frame(
     min_area: float = Form(None),
     min_feature_mm: float = Form(None),
     tolerance_mm: float = Form(None),
+    reference_name: str = Form(None),  # Referensi yang dipilih user (opsional)
 ):
     """
     Update latest frame dan jalankan deteksi real-time.
@@ -326,8 +386,11 @@ async def update_frame(
                 }
                 obj_list.append(obj_data)
                 
-                # Bandingkan dengan referensi untuk status GOOD/NO GOOD/NO REF
-                status, matched_ref, detail = ref_manager.compare(obj, _tolerance_mm)
+                # Bandingkan dengan referensi yang dipilih user (atau auto-match jika tidak ada)
+                if reference_name:
+                    status, matched_ref, detail = ref_manager.compare_with(obj, reference_name, _tolerance_mm)
+                else:
+                    status, matched_ref, detail = ref_manager.compare(obj, _tolerance_mm)
                 result_list.append({
                     "status":      status,
                     "matched_ref": matched_ref,
@@ -438,18 +501,19 @@ async def process_image(
         # 5. Get the largest object (assume it's the part to inspect)
         obj = max(objects, key=lambda o: o.area_px)
         
-        # 6. Compare with reference
-        status, matched_ref, detail = ref_manager.compare(obj, tolerance_mm)
+        # 6. Compare dengan referensi yang DIPILIH user (bukan auto-match ke semua referensi)
+        status, matched_ref, detail = ref_manager.compare_with(obj, reference_name, tolerance_mm)
         
-        # 7. Calculate deviations
+        # 7. Calculate deviations terhadap referensi yang dipilih
         deviations = {}
         if matched_ref and matched_ref in ref_manager.refs:
             ref = ref_manager.refs[matched_ref]
             if obj.shape == "circle":
                 deviations["diameter_mm"] = round(obj.diameter_mm - ref["diameter_mm"], 2)
             else:
-                deviations["width_mm"] = round(obj.width_mm - ref["width_mm"], 2)
+                deviations["width_mm"]  = round(obj.width_mm  - ref["width_mm"],  2)
                 deviations["height_mm"] = round(obj.height_mm - ref["height_mm"], 2)
+
         
         # 8. Prepare measurements
         measurements = {

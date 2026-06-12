@@ -67,6 +67,7 @@ class ReferenceManager:
     def compare(self, obj: DetectedObject, tol: float) -> tuple:
         """
         Bandingkan dimensi objek terdeteksi dengan profil referensi yang cocok.
+        Auto-match: cari referensi terbaik dari semua referensi yang ada.
         Mengembalikan tuple: (status [GOOD/NO GOOD/NO REF], nama_referensi_terdekat, string_detail)
         """
         same = {n:d for n,d in self.refs.items() if d["shape"]==obj.shape}
@@ -109,6 +110,35 @@ class ReferenceManager:
             detail = (f"P ref={ref['width_mm']:.1f} got={obj.width_mm:.1f} "
                       f"| L ref={ref['height_mm']:.1f} got={obj.height_mm:.1f} ✗")
         return "NO GOOD", closest, detail
+
+    def compare_with(self, obj: DetectedObject, ref_name: str, tol: float) -> tuple:
+        """
+        Bandingkan dimensi objek dengan referensi SPESIFIK yang dipilih user.
+        Jika referensi tidak ditemukan, fallback ke auto-match.
+        Mengembalikan tuple: (status [GOOD/NO GOOD/NO REF], nama_referensi, string_detail)
+        """
+        if ref_name not in self.refs:
+            print(f"[REF] Referensi '{ref_name}' tidak ditemukan, fallback ke auto-match")
+            return self.compare(obj, tol)
+
+        ref = self.refs[ref_name]
+        t   = ref.get("tolerance_mm", tol)
+
+        if obj.shape == "circle":
+            d      = abs(obj.diameter_mm - ref["diameter_mm"])
+            ok     = d <= t
+            detail = (f"Ø ref={ref['diameter_mm']:.1f} got={obj.diameter_mm:.1f} "
+                      f"Δ={d:.1f}mm {'✓' if ok else '✗'}")
+        else:
+            dw = abs(obj.width_mm  - ref["width_mm"])
+            dh = abs(obj.height_mm - ref["height_mm"])
+            ok = dw <= t and dh <= t
+            detail = (f"P ref={ref['width_mm']:.1f} got={obj.width_mm:.1f} Δ={dw:.1f} "
+                      f"| L ref={ref['height_mm']:.1f} got={obj.height_mm:.1f} Δ={dh:.1f} "
+                      f"{'✓' if ok else '✗'}")
+
+        status = "GOOD" if ok else "NO GOOD"
+        return status, ref_name, detail
 
     def list_names(self) -> list:
         """Mengembalikan daftar nama profil referensi."""
