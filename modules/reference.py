@@ -8,18 +8,55 @@ import json
 from modules.utils import now_str
 from modules.detection import DetectedObject
 
-def _outer_delta(obj: DetectedObject, ref: dict) -> float:
-    """Hitung selisih dimensi terluar antara objek terdeteksi dan profil referensi."""
+
+def _score(obj: DetectedObject, ref: dict) -> float:
+    """
+    Hitung skor kemiripan antara objek dan referensi menggunakan
+    selisih relatif (persentase) terhadap ukuran referensi.
+    Skor lebih kecil = lebih mirip (0% = cocok sempurna).
+    Menggunakan max dari selisih relatif width & height (atau diameter).
+    """
     if obj.shape == "circle":
-        return abs(obj.diameter_mm - ref.get("diameter_mm", 0))
-    return abs(obj.width_mm - ref.get("width_mm", 0)) + abs(obj.height_mm - ref.get("height_mm", 0))
+        ref_d = ref.get("diameter_mm", 1)
+        if ref_d <= 0:
+            return float("inf")
+        return abs(obj.diameter_mm - ref_d) / ref_d * 100
+    else:
+        ref_w = ref.get("width_mm", 1)
+        ref_h = ref.get("height_mm", 1)
+        if ref_w <= 0 or ref_h <= 0:
+            return float("inf")
+        pct_w = abs(obj.width_mm - ref_w) / ref_w * 100
+        pct_h = abs(obj.height_mm - ref_h) / ref_h * 100
+        return max(pct_w, pct_h)
+
+
+def _within_tolerance(obj: DetectedObject, ref: dict, tol: float) -> bool:
+    """
+    Cek apakah objek masuk dalam toleransi absolut.
+    SELALU menggunakan `tol` dari parameter (kalibrasi terbaru dari backend),
+    BUKAN toleransi lama yang tersimpan di dalam data referensi.
+    """
+    if obj.shape == "circle":
+        return abs(obj.diameter_mm - ref.get("diameter_mm", 0)) <= tol
+    dw = abs(obj.width_mm - ref.get("width_mm", 0))
+    dh = abs(obj.height_mm - ref.get("height_mm", 0))
+    return dw <= tol and dh <= tol
 
 
 class ReferenceManager:
     """
     Menyimpan dan membandingkan profil dimensi referensi dari referensi.json.
     Mendukung banyak profil bernama untuk setiap tipe bentuk.
+
+    Algoritma matching:
+    1. Filter referensi dengan shape yang sama
+    2. Hitung score relatif (%) untuk semua referensi
+    3. Pilih yang paling mirip (score terkecil) di antara yang dalam toleransi → GOOD
+    4. Jika tidak ada yang dalam toleransi → pilih paling dekat → NO GOOD
+    5. Toleransi SELALU dari parameter (kalibrasi terbaru), bukan yang tersimpan di ref
     """
+
     def __init__(self, filepath: str):
         self.filepath = filepath
         self.refs: dict = {}
@@ -32,7 +69,7 @@ class ReferenceManager:
                     self.refs = json.load(f)
                 print(f"[REF] {len(self.refs)} referensi dimuat dari '{self.filepath}'")
                 for name, d in self.refs.items():
-                    key = d.get("diameter_mm", d.get("width_mm","?"))
+                    key = d.get("diameter_mm", d.get("width_mm", "?"))
                     print(f"  · '{name}' — {d['shape']} ({key} mm)")
             except Exception as e:
                 print(f"[REF] Gagal baca: {e}")
@@ -66,76 +103,91 @@ class ReferenceManager:
 
     def compare(self, obj: DetectedObject, tol: float) -> tuple:
         """
-        Bandingkan dimensi objek terdeteksi dengan profil referensi yang cocok.
-        Auto-match: cari referensi terbaik dari semua referensi yang ada.
-        Mengembalikan tuple: (status [GOOD/NO GOOD/NO REF], nama_referensi_terdekat, string_detail)
+        Bandingkan dimensi objek terdeteksi dengan profil referensi.
+        Auto-match dengan scoring relatif — pilih referensi yang paling mirip.
+
+        Toleransi selalu menggunakan `tol` dari parameter (kalibrasi terbaru dari backend).
+        Toleransi yang tersimpan di data referensi DIABAIKAN untuk matching,
+        agar perubahan toleransi di engineer page langsung berlaku.
+
+        Returns:
+            tuple: (status, nama_referensi, detail_string)
+            status: 'GOOD' | 'NO GOOD' | 'NO REF'
         """
-        same = {n:d for n,d in self.refs.items() if d["shape"]==obj.shape}
+        # Filter referensi dengan shape yang sama
+        same = {n: d for n, d in self.refs.items() if d["shape"] == obj.shape}
         if not same:
-            return "NO REF", None, f"Belum ada referensi untuk {obj.shape}"
+            return "NO REF", None, f"Belum ada referensi untuk shape '{obj.shape}'"
 
-        best_name = None
-        best_delta = float("inf")
+        # Hitung score untuk semua referensi, pisahkan yang dalam/luar toleransi
+        candidates_in  = []  # yang dalam toleransi
+        candidates_out = []  # yang di luar toleransi
+
         for name, ref in same.items():
-            t = ref.get("tolerance_mm", tol)
-            if obj.shape == "circle":
-                delta = abs(obj.diameter_mm - ref["diameter_mm"])
-                ok    = delta <= t
+            score = _score(obj, ref)
+            if _within_tolerance(obj, ref, tol):
+                candidates_in.append((name, ref, score))
             else:
-                dw = abs(obj.width_mm  - ref["width_mm"])
-                dh = abs(obj.height_mm - ref["height_mm"])
-                delta = max(dw, dh)
-                ok = dw<=t and dh<=t
+                candidates_out.append((name, ref, score))
 
-            if ok and delta < best_delta:
-                best_delta = delta
-                best_name = name
+        # Ada yang dalam toleransi → pilih yang score terkecil → GOOD
+        if candidates_in:
+            candidates_in.sort(key=lambda x: x[2])
+            best_name, best_ref, best_score = candidates_in[0]
 
-        if best_name:
-            ref = same[best_name]
             if obj.shape == "circle":
-                d = abs(obj.diameter_mm - ref["diameter_mm"])
-                detail = f"Ø ref={ref['diameter_mm']:.1f} got={obj.diameter_mm:.1f} Δ={d:.1f}mm ✓"
+                d = abs(obj.diameter_mm - best_ref["diameter_mm"])
+                detail = (f"Ø ref={best_ref['diameter_mm']:.2f} got={obj.diameter_mm:.2f} "
+                          f"Δ={d:.2f}mm tol=±{tol:.2f}mm ✓")
             else:
-                detail = (f"P ref={ref['width_mm']:.1f} got={obj.width_mm:.1f} "
-                          f"| L ref={ref['height_mm']:.1f} got={obj.height_mm:.1f} ✓")
+                dw = abs(obj.width_mm  - best_ref["width_mm"])
+                dh = abs(obj.height_mm - best_ref["height_mm"])
+                detail = (f"W ref={best_ref['width_mm']:.2f} got={obj.width_mm:.2f} Δ={dw:.2f} "
+                          f"| H ref={best_ref['height_mm']:.2f} got={obj.height_mm:.2f} Δ={dh:.2f} "
+                          f"tol=±{tol:.2f}mm ✓")
             return "GOOD", best_name, detail
 
-        closest = min(same, key=lambda n: _outer_delta(obj, same[n]))
-        ref = same[closest]
+        # Tidak ada yang dalam toleransi → pilih yang paling dekat → NO GOOD
+        candidates_out.sort(key=lambda x: x[2])
+        closest_name, closest_ref, closest_score = candidates_out[0]
+
         if obj.shape == "circle":
-            d = abs(obj.diameter_mm - ref["diameter_mm"])
-            detail = f"Ø ref={ref['diameter_mm']:.1f} got={obj.diameter_mm:.1f} Δ={d:.1f}mm ✗"
+            d = abs(obj.diameter_mm - closest_ref["diameter_mm"])
+            detail = (f"Ø ref={closest_ref['diameter_mm']:.2f} got={obj.diameter_mm:.2f} "
+                      f"Δ={d:.2f}mm tol=±{tol:.2f}mm ✗")
         else:
-            detail = (f"P ref={ref['width_mm']:.1f} got={obj.width_mm:.1f} "
-                      f"| L ref={ref['height_mm']:.1f} got={obj.height_mm:.1f} ✗")
-        return "NO GOOD", closest, detail
+            dw = abs(obj.width_mm  - closest_ref["width_mm"])
+            dh = abs(obj.height_mm - closest_ref["height_mm"])
+            detail = (f"W ref={closest_ref['width_mm']:.2f} got={obj.width_mm:.2f} Δ={dw:.2f} "
+                      f"| H ref={closest_ref['height_mm']:.2f} got={obj.height_mm:.2f} Δ={dh:.2f} "
+                      f"tol=±{tol:.2f}mm ✗")
+        return "NO GOOD", closest_name, detail
 
     def compare_with(self, obj: DetectedObject, ref_name: str, tol: float) -> tuple:
         """
-        Bandingkan dimensi objek dengan referensi SPESIFIK yang dipilih user.
+        Bandingkan dimensi objek dengan referensi SPESIFIK.
         Jika referensi tidak ditemukan, fallback ke auto-match.
-        Mengembalikan tuple: (status [GOOD/NO GOOD/NO REF], nama_referensi, string_detail)
+
+        Toleransi selalu menggunakan `tol` dari parameter (kalibrasi terbaru dari backend).
         """
         if ref_name not in self.refs:
             print(f"[REF] Referensi '{ref_name}' tidak ditemukan, fallback ke auto-match")
             return self.compare(obj, tol)
 
         ref = self.refs[ref_name]
-        t   = ref.get("tolerance_mm", tol)
 
         if obj.shape == "circle":
-            d      = abs(obj.diameter_mm - ref["diameter_mm"])
-            ok     = d <= t
-            detail = (f"Ø ref={ref['diameter_mm']:.1f} got={obj.diameter_mm:.1f} "
-                      f"Δ={d:.1f}mm {'✓' if ok else '✗'}")
+            d = abs(obj.diameter_mm - ref["diameter_mm"])
+            ok = d <= tol
+            detail = (f"Ø ref={ref['diameter_mm']:.2f} got={obj.diameter_mm:.2f} "
+                      f"Δ={d:.2f}mm tol=±{tol:.2f}mm {'✓' if ok else '✗'}")
         else:
             dw = abs(obj.width_mm  - ref["width_mm"])
             dh = abs(obj.height_mm - ref["height_mm"])
-            ok = dw <= t and dh <= t
-            detail = (f"P ref={ref['width_mm']:.1f} got={obj.width_mm:.1f} Δ={dw:.1f} "
-                      f"| L ref={ref['height_mm']:.1f} got={obj.height_mm:.1f} Δ={dh:.1f} "
-                      f"{'✓' if ok else '✗'}")
+            ok = dw <= tol and dh <= tol
+            detail = (f"W ref={ref['width_mm']:.2f} got={obj.width_mm:.2f} Δ={dw:.2f} "
+                      f"| H ref={ref['height_mm']:.2f} got={obj.height_mm:.2f} Δ={dh:.2f} "
+                      f"tol=±{tol:.2f}mm {'✓' if ok else '✗'}")
 
         status = "GOOD" if ok else "NO GOOD"
         return status, ref_name, detail

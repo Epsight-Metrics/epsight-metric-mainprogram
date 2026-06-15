@@ -32,6 +32,10 @@ DEFAULT_CONTOUR_THRESH = _config.get("contour_thresh", 150)
 DEFAULT_MIN_AREA       = _config.get("contour_min_area", 1500)
 DEFAULT_MIN_FEATURE_MM = _config.get("min_feature_mm", 5.0)
 DEFAULT_TOLERANCE_MM   = _config.get("tolerance_mm", 1.0)
+# Resolusi kamera saat kalibrasi PPM dilakukan (dari config.json)
+# Digunakan untuk koreksi PPM otomatis jika gambar masuk berbeda resolusi
+CALIB_WIDTH  = _config.get("capture_width",  1920)
+CALIB_HEIGHT = _config.get("capture_height", 1080)
 
 # URL Backend API untuk sinkronisasi referensi dari database
 BACKEND_API_URL = os.getenv(
@@ -79,6 +83,9 @@ async def fetch_calibration_from_backend() -> dict:
                     "contour_thresh": int(  data.get("contour_thresh", DEFAULT_CONTOUR_THRESH)),
                     "min_area":       float(data.get("contour_min_area", DEFAULT_MIN_AREA)),
                     "min_feature_mm": float(data.get("min_feature_mm", DEFAULT_MIN_FEATURE_MM)),
+                    # Resolusi saat PPM dikalibrasi (digunakan untuk koreksi scaling)
+                    "calib_width":  CALIB_WIDTH,
+                    "calib_height": CALIB_HEIGHT,
                 }
                 print(f"[CALIB-SYNC] Kalibrasi dimuat dari backend: ppm={calib['ppm']}, "
                       f"thresh={calib['contour_thresh']}, min_area={calib['min_area']}")
@@ -95,7 +102,34 @@ async def fetch_calibration_from_backend() -> dict:
         "contour_thresh": DEFAULT_CONTOUR_THRESH,
         "min_area":       DEFAULT_MIN_AREA,
         "min_feature_mm": DEFAULT_MIN_FEATURE_MM,
+        "calib_width":    CALIB_WIDTH,
+        "calib_height":   CALIB_HEIGHT,
     }
+
+
+def scale_ppm_for_image(base_ppm: float, image: np.ndarray, calib_width: int, calib_height: int) -> float:
+    """
+    Koreksi otomatis PPM berdasarkan resolusi gambar yang masuk.
+
+    Jika gambar dari browser camera (1280x720) sedangkan PPM dikalibrasi
+    untuk kamera inspeksi (1920x1080), objek yang sama akan terlihat lebih
+    kecil di gambar browser → PPM perlu di-scale turun proporsional.
+
+    Formula: ppm_koreksi = base_ppm × (image_width / calib_width)
+    Menggunakan dimensi lebar (width) sebagai acuan scaling.
+    """
+    img_h, img_w = image.shape[:2]
+    if calib_width <= 0 or img_w <= 0:
+        return base_ppm
+
+    scale = img_w / calib_width
+    corrected_ppm = base_ppm * scale
+
+    if abs(scale - 1.0) > 0.01:  # hanya log jika ada perbedaan signifikan
+        print(f"[PPM-SCALE] Gambar {img_w}×{img_h} vs kalibrasi {calib_width}×{calib_height} "
+              f"→ scale={scale:.4f}, ppm {base_ppm:.4f} → {corrected_ppm:.4f}")
+
+    return corrected_ppm
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -261,11 +295,13 @@ async def save_reference(
         calib = await fetch_calibration_from_backend()
 
         # Parameter dari request bisa override jika dikirim eksplisit
-        _ppm            = ppm            if ppm            is not None else calib["ppm"]
+        _base_ppm       = ppm            if ppm            is not None else calib["ppm"]
         _tolerance_mm   = tolerance_mm   if tolerance_mm   is not None else calib["tolerance_mm"]
         _contour_thresh = contour_thresh if contour_thresh is not None else calib["contour_thresh"]
         _min_area       = min_area       if min_area       is not None else calib["min_area"]
         _min_feature_mm = min_feature_mm if min_feature_mm is not None else calib["min_feature_mm"]
+        _calib_width    = calib.get("calib_width",  CALIB_WIDTH)
+        _calib_height   = calib.get("calib_height", CALIB_HEIGHT)
 
         # 2. Decode image
         contents = await file.read()
@@ -275,13 +311,17 @@ async def save_reference(
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
 
-        # 3. Preprocess image
+        # 3. Koreksi PPM otomatis berdasarkan resolusi gambar vs resolusi kalibrasi
+        #    Ini menangani kasus kamera browser (1280x720) vs kamera inspeksi (1920x1080)
+        _ppm = scale_ppm_for_image(_base_ppm, image, _calib_width, _calib_height)
+
+        # 4. Preprocess image
         gray, blurred, enhanced = preprocess(image)
 
-        # 4. Get binary image
+        # 5. Get binary image
         binary = get_binary(enhanced, _contour_thresh)
 
-        # 5. Find objects
+        # 6. Find objects dengan PPM yang sudah dikoreksi
         objects = find_objects(binary, _min_area, _ppm, _min_feature_mm)
 
         if not objects:
@@ -298,17 +338,25 @@ async def save_reference(
                 "timestamp": now_iso()
             }
 
-        # 6. Get the object
+        # 7. Get the object
         obj = objects[0]
 
-        # 7. Save reference dengan kalibrasi yang sudah di-fetch dari backend
+        # 8. Save reference dengan kalibrasi yang sudah di-fetch dan di-koreksi
         ref_data = ref_manager.save_reference(obj, name, _tolerance_mm)
 
+        img_h, img_w = image.shape[:2]
         return {
             "success": True,
             "reference": ref_data,
             "message": f"Reference '{name}' saved successfully",
-            "calibration_used": {"ppm": _ppm, "source": "backend"},
+            "calibration_used": {
+                "ppm_base": _base_ppm,
+                "ppm_corrected": round(_ppm, 4),
+                "image_resolution": f"{img_w}x{img_h}",
+                "calib_resolution": f"{_calib_width}x{_calib_height}",
+                "scale_factor": round(img_w / _calib_width, 4),
+                "source": "backend"
+            },
             "timestamp": now_iso()
         }
 
