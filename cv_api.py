@@ -47,20 +47,21 @@ BACKEND_API_URL = os.getenv(
 ref_manager = ReferenceManager("referensi.json")
 
 async def sync_references_from_db():
-    """Load referensi dari Backend API (database) ke ref_manager di RAM."""
+    """Load referensi dari Backend API (database) ke ref_manager di RAM dan disk."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.get(f"{BACKEND_API_URL}/api/reference/public")
             if res.status_code == 200:
                 data = res.json()
-                if isinstance(data, dict) and data:
+                if isinstance(data, dict):
                     ref_manager.refs = data
-                    print(f"[REF-SYNC] {len(data)} referensi dimuat dari database")
+                    ref_manager._save()  # Simpan perubahan ke referensi.json lokal
+                    print(f"[REF-SYNC] {len(data)} referensi dimuat dan disinkronkan ke disk")
                     for name, d in data.items():
                         key = d.get("diameter_mm", d.get("width_mm", "?"))
                         print(f"  · '{name}' — {d['shape']} ({key} mm)")
                 else:
-                    print("[REF-SYNC] Database kosong, tidak ada referensi")
+                    print("[REF-SYNC] Respon tidak valid dari backend")
             else:
                 print(f"[REF-SYNC] Backend API error {res.status_code}, pakai referensi.json lokal")
     except Exception as e:

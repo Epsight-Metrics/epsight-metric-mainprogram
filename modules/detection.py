@@ -32,15 +32,20 @@ def classify_shape(contour) -> tuple:
     x, y, w, h   = cv2.boundingRect(contour)
     aspect_ratio = min(w,h) / max(w,h) if max(w,h) > 0 else 0
 
-    if circularity > 0.75:
-        return "circle", n, circularity
-    if aspect_ratio > 0.88 and n > 6:
-        return "circle", n, circularity
+    # 1. Cek bentuk segitiga dan segi empat terlebih dahulu agar tidak salah terklasifikasi sebagai lingkaran
     if n == 3:
         return "triangle", n, circularity
     if n == 4:
         ar = w/float(h) if h>0 else 1
         return ("square" if 0.90<=ar<=1.10 else "rectangle"), n, circularity
+
+    # 2. Cek bentuk lingkaran dengan threshold sirkularitas lebih tinggi (>= 0.85)
+    #    agar persegi dengan sudut menumpul/bayangan tidak terdeteksi sebagai lingkaran
+    if circularity > 0.85:
+        return "circle", n, circularity
+    if aspect_ratio > 0.88 and n > 6:
+        return "circle", n, circularity
+
     if n == 5:
         return "pentagon", n, circularity
     if n == 6:
