@@ -1,29 +1,59 @@
-{
-  "camera_source": 1,
-  "droidcam_fix": true,
-  "capture_width": 1920,
-  "capture_height": 1080,
-  "pixel_per_mm": 7.86,
-  "roi_percent": [
-    0.2,
-    0.1,
-    0.8,
-    0.9
-  ],
-  "contour_min_area": 1500,
-  "contour_thresh": 150,
-  "min_feature_mm": 5.0,
-  "tolerance_mm": 1.0,
-  "warning_duration": 5.0,
-  "dir_screenshot": "screenshots",
-  "dir_deteksi": "deteksi_part",
-  "file_reference": "referensi.json",
-  "db": {
-    "enabled": false,
-    "host": "10.11.122.111",
-    "port": 5432,
-    "dbname": "test",
-    "user": "postgres",
-    "password": "rahasia"
-  }
+﻿{
+    "camera_source":  1,
+    "droidcam_fix":  true,
+    "capture_width":  1920,
+    "capture_height":  1080,
+    "pixel_per_mm":  7.86,
+    "roi_percent":  [
+                        0.2,
+                        0.1,
+                        0.8,
+                        0.9
+                    ],
+    "contour_min_area":  1500,
+    "contour_thresh":  150,
+    "min_feature_mm":  5.0,
+    "tolerance_mm":  1.0,
+    "warning_duration":  5.0,
+    "dir_screenshot":  "screenshots",
+    "dir_deteksi":  "deteksi_part",
+    "file_reference":  "referensi.json",
+    "api":  {
+                "enabled":  true,
+                "api_url":  "https://epsight-metric-backend-production.up.railway.app",
+                "part_id":  1,
+                "operator_id":  null,
+                "session_id":  null,
+                "batch_id":  null,
+                "timeout":  5,
+                "api_key":  ""
+            },
+    "video_stream":  {
+                "mode":  "websocket",
+                "websocket":  {
+                    "enabled":  true,
+                    "port":  5000,
+                    "quality":  70,
+                    "fps_limit":  30
+                },
+                "cloud":  {
+                    "enabled":  false,
+                    "quality":  60,
+                    "fps":  10
+                },
+                "use_websocket": true
+            },
+    "cv_api":  {
+                "enabled":  true,
+                "cv_api_url":  "https://epsight-metric-mainprogram-production.up.railway.app",
+                "upload_interval":  0.5
+            },
+    "db":  {
+               "enabled":  false,
+               "host":  "10.11.122.111",
+               "port":  5432,
+               "dbname":  "test",
+               "user":  "postgres",
+               "password":  "rahasia"
+           }
 }
